@@ -948,10 +948,13 @@ var zeroLiteral = map[string]bool{
 	"0i":  true,
 }
 
-// lintVarDecls examines variable declarations. It complains about declarations with
-// redundant LHS types that can be inferred from the RHS.
+// lintVarDecls examines variable declarations. It complains about declarations
+// where all the RHS types are the same, and some have LHS types that can be
+// inferred from the RHS and others don't.
 func (f *file) lintVarDecls() {
 	var lastGen *ast.GenDecl // last GenDecl entered.
+	var totalDecls, hasLHS int
+	var firstRHS interface{}
 
 	f.walk(func(node ast.Node) bool {
 		switch v := node.(type) {
@@ -959,13 +962,16 @@ func (f *file) lintVarDecls() {
 			if v.Tok != token.CONST && v.Tok != token.VAR {
 				return false
 			}
+			totalDecls = 0
+			hasLHS = 0
+			firstRHS = nil
 			lastGen = v
 			return true
 		case *ast.ValueSpec:
 			if lastGen.Tok == token.CONST {
 				return false
 			}
-			if len(v.Names) > 1 || v.Type == nil || len(v.Values) == 0 {
+			if len(v.Names) > 1 || len(v.Values) == 0 {
 				return false
 			}
 			rhs := v.Values[0]
@@ -985,35 +991,29 @@ func (f *file) lintVarDecls() {
 				f.errorf(rhs, 0.9, category("zero-value"), "should drop = %s from declaration of var %s; it is the zero value", f.render(rhs), v.Names[0])
 				return false
 			}
-			lhsTyp := f.pkg.typeOf(v.Type)
 			rhsTyp := f.pkg.typeOf(rhs)
 
-			if !validType(lhsTyp) || !validType(rhsTyp) {
+			if !validType(rhsTyp) {
 				// Type checking failed (often due to missing imports).
 				return false
 			}
 
-			if !types.Identical(lhsTyp, rhsTyp) {
-				// Assignment to a different type is not redundant.
-				return false
+			switch {
+			case firstRHS == nil:
+				firstRHS = rhsTyp
+			case rhsTyp != firstRHS:
+				// If there are multiple RHS types in the block, don't check.
+				return true
 			}
+			totalDecls += 1
 
-			// The next three conditions are for suppressing the warning in situations
-			// where we were unable to typecheck.
-
-			// If the LHS type is an interface, don't warn, since it is probably a
-			// concrete type on the RHS. Note that our feeble lexical check here
-			// will only pick up interface{} and other literal interface types;
-			// that covers most of the cases we care to exclude right now.
-			if _, ok := v.Type.(*ast.InterfaceType); ok {
-				return false
+			if v.Type != nil {
+				// f.errorf(v.Type, 0.8, category("type-inference"), "should omit type %s from declaration of var %s; it will be inferred from the right-hand side", f.render(v.Type), v.Names[0])
+				hasLHS += 1
 			}
-			// If the RHS is an untyped const, only warn if the LHS type is its default type.
-			if defType, ok := f.isUntypedConst(rhs); ok && !isIdent(v.Type, defType) {
-				return false
+			if 0 < hasLHS && hasLHS < totalDecls {
+				f.errorf(rhs, 0.8, category("type-inference"), "should omit redundant type from all decls or use the type in all decls")
 			}
-
-			f.errorf(v.Type, 0.8, category("type-inference"), "should omit type %s from declaration of var %s; it will be inferred from the right-hand side", f.render(v.Type), v.Names[0])
 			return false
 		}
 		return true
